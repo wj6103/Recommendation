@@ -1,7 +1,7 @@
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.feature.{BucketedRandomProjectionLSH, Word2Vec}
+import org.apache.spark.ml.feature.{BucketedRandomProjectionLSH, IDF, Word2Vec}
 import org.apache.spark.sql.{Row, SparkSession}
-import org.apache.spark.sql.functions.{col,udf,lit}
+import org.apache.spark.sql.functions.{col, lit, udf}
 
 object ContentBasedFiltering {
   def main(args: Array[String]): Unit = {
@@ -14,21 +14,24 @@ object ContentBasedFiltering {
       .drop("userId").drop("timestamp").toDF()
     apps.registerTempTable("apps")
     val data = apps.sqlContext.sql("select movieId,concat_ws(',', collect_list(tag)) from apps group by movieId")
-      .map((x => (x.getString(0),Seq(x.getString(1))))).toDF("id","keywords")
-    val test = data.first()
-//    data.show(false)
+      .filter(x => {x.getString(1).split(",").length < 10})
+      .map((x => (x.getString(0),Seq(x.getString(1)),Seq(x.getString(1))))).toDF("id","keywords","keyword2")
+
     val word2Vec = new Word2Vec()
       .setInputCol("keywords")
       .setOutputCol("features")
-      .setVectorSize(300)
+      .setVectorSize(100)
       .setMaxIter(5)
       .setMinCount(1)
       .fit(data)
+//    val w2v = word2Vec.transform(data)
+//    w2v.show(false)
+    val vector1 = word2Vec.getVectors.select(col("word").as("itemA"),col("vector").as("vectorA"))
+    val vector2 = word2Vec.getVectors.select(col("word").as("itemB"),col("vector").as("vectorB"))
 
+    val crossdata = vector1.crossJoin(vector2)
 
-    word2Vec.findSynonyms("Disney",5).show(false)
-    val w2v = word2Vec.transform(data)
-    w2v.show(false)
+    crossdata.show(false)
 
 //    val brp = new BucketedRandomProjectionLSH()
 //      .setBucketLength(4.0)
