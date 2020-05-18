@@ -1,4 +1,3 @@
-import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.feature.{ Word2VecModel}
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.SparkSession
@@ -8,14 +7,17 @@ import scala.collection.mutable
 
 object PornRecommend {
   def main(args: Array[String]): Unit = {
-    Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
-    Logger.getLogger("org.eclipse.jetty.server").setLevel(Level.OFF)
-    val spark = SparkSession.builder.master("local").appName("MovieRecommend").getOrCreate()
+    val spark = SparkSession.builder.appName("MovieRecommend")
+//      .master("local")
+      .getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+
     import spark.implicits._
-    val title = "GERMAN SCOUT - BIG HANGING TITS TEEN ANISSA CHEAT BF AT OUTDOOR CASTING SEX"
-    val tags = "big cock,big boobs,teenager,young,public,german scout,public agent,teen,hanging tits,saggy tits,big tits,money,cash,anissa jolie,big tits teen,outdoor".split(",")
+    val title = args(0)
+    val tags = args(1).split(",")
     val df = Seq((title,tags)).toDF("title","tags")
-    val modelPath = "./PornTagsWord2Vec.model"
+    val modelPath = "PornTagsWord2Vec.model"
+//    val modelPath = args(0)
     val testData = Word2VecModel.load(modelPath).transform(df).select("features")
 
     val toArr: Any => Array[Double] = _.asInstanceOf[DenseVector].toArray
@@ -26,11 +28,10 @@ object PornRecommend {
           array
         }).first()
 
-    val metadata = spark.read.json("/Users/james/Desktop/porn.json")
-      .filter("tags is not null")
+    val metadata = spark.read.option("inferSchema", "true").json("porn.json")
       .map(x=>{
         val actors = x.getAs[mutable.WrappedArray[String]](0)
-        val features = x.getStruct(1).getAs[mutable.WrappedArray[Double]](3).toArray
+        val features = x.getAs[mutable.WrappedArray[Double]](1).toArray
         val id = x.getLong(2)
         val image = x.getString(3)
         val like = x.getLong(4)
@@ -41,19 +42,21 @@ object PornRecommend {
         val watch = x.getLong(9)
         val sim = cosineSimilarity(features,dataWithFeaturesArr)
         (id,title,actors,tags,image,url,published_time,like,watch,features,sim)
-    }).toDF("id","title","actors","tags","image","url","published_time","like","watch","features","sim").filter($"title"=!=title && !$"sim".isNaN )
+    }).toDF("id","title","actors","tags","image","url","published_time","like","watch","features","sim")
+
+      val recomResult = metadata.filter($"title"=!=title && !$"sim".isNaN )
       .select("id","title","tags","sim").orderBy(desc("sim")).show(false)
 
 
   }
   def cosineSimilarity(x: Array[Double], y: Array[Double]): Double = {
-//    require(x.size == y.size)
+    require(x.size == y.size)
     dotProduct(x, y)/(magnitude(x) * magnitude(y))
   }
   def dotProduct(x: Array[Double], y: Array[Double]): Double = {
     (for((a, b) <- x zip y) yield a * b) sum
   }
   def magnitude(x: Array[Double]): Double = {
-    math.sqrt(x map(i => i*i) sum)
+    math.sqrt(x map(i => i*i) sum).toFloat
   }
 }

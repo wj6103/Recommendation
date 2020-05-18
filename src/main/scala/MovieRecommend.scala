@@ -1,10 +1,7 @@
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.SparkContext
 import org.apache.spark.ml.evaluation.RegressionEvaluator
-import org.apache.spark.ml.recommendation.ALSModel
 import org.apache.spark.sql._
 import org.apache.spark.mllib.recommendation.Rating
-//import org.apache.spark.mllib.recommendation.ALS
 import org.apache.spark.ml.recommendation.ALS
 
 object MovieRecommend {

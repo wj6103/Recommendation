@@ -1,18 +1,36 @@
+import java.util.Calendar
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.ml.feature.Word2Vec
-import org.apache.spark.sql.SparkSession
-import org.apache.spark.sql.functions.monotonically_increasing_id
-
+import org.apache.spark.ml.feature.{BucketedRandomProjectionLSH, Word2Vec}
+import org.apache.spark.ml.linalg.DenseVector
+import org.apache.spark.rdd.RDD
+import org.apache.spark.sql.expressions.Window
+import org.apache.spark.sql.{DataFrame, Dataset, Row, SparkSession}
+import org.apache.spark.sql.functions._
+import org.elasticsearch.spark.sql._
+import org.slf4j
+import org.slf4j.LoggerFactory
 import scala.collection.mutable
 
 object MovieRecommendContentBasedFiltering {
+  private val logger: slf4j.Logger = LoggerFactory.getLogger(MovieRecommendContentBasedFiltering.getClass)
   def main(args: Array[String]): Unit = {
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
     Logger.getLogger("org.eclipse.jetty.server").setLevel(Level.OFF)
-    val spark = SparkSession.builder.master("local").appName("MovieRecommend").getOrCreate()
-    //clean(spark,"/Users/james/Desktop/pornhub_crawler.jl","/Users/james/Desktop/pornhub.json")
-    val porn = spark.read.json("/Users/james/Desktop/pornhub.json").withColumn("id",monotonically_increasing_id)
-      .select("id","title","actors","tags","watch","like","image","video_url","published_time").filter("tags is not null").toDF()
+    val spark = SparkSession.builder.appName("MovieRecommend")//.master("local[*]")
+      //.config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
+      //.config("spark.kryoserializer.buffer.max","512")
+      .config("es.index.auto.create", "true")
+      .config("es.nodes.wan.only","false")
+      .config("es.nodes", "10.205.48.10")
+      .config("es.port", "9200")
+      .getOrCreate()
+
+    import spark.implicits._
+    val filePath = "file:///Users/james/Desktop/pornhub.json"
+    val hdfsPath = "/user/james/pornhub.json"
+    val porn = spark.read.json(hdfsPath).filter(size($"tags")>0).withColumn("id",monotonically_increasing_id)
+      //.select("id","title","actors","categories","tags","watch","like","image","video_url","published_time")
+      .toDF()
 
     val w2v = new Word2Vec()
       .setInputCol("tags")
@@ -21,12 +39,26 @@ object MovieRecommendContentBasedFiltering {
       .setVectorSize(300)
       .setMinCount(1)
       .fit(porn)
-    val output = w2v.transform(porn)
-    output.show()
-    output.write.json("/Users/james/Desktop/porn.json")
-    w2v.save("/Users/james/Desktop/PornTagsWord2Vec.model")
+    val w2vResult = w2v.transform(porn)
 
+    val compare = w2vResult.select("id","features").map(a => (a.getLong(0),a.getAs[DenseVector](1).toArray)).cache()
+    val comArray = compare.collect()
+    val comRdd = compare.rdd//.repartition(args(0).toInt)
 
+    val br_c = spark.sparkContext.broadcast(comArray)
+
+    val r = comRdd.map(rdd => {
+      val recommend = br_c.value.map(d => {
+        val sim = cosineSimilarity(rdd._2, d._2)
+        (d._1,sim)
+      }).filter(_._1!=rdd._1).sortBy(-_._2).take(21).map(_._1)
+      (rdd._1,recommend)
+    }).collect().sortBy(_._1)
+    val rddResult = spark.sparkContext.parallelize(r).toDF("id","sim")
+
+    val resultDF = porn.join(rddResult,porn("id")===rddResult("id")).drop(rddResult("id"))
+    //resultDF.write.json("porn_sim.json")
+    resultDF.saveToEs("porn/recommend")
   }
 
   def clean(spark:SparkSession,inputPath:String,outputPath:String): Unit ={
@@ -51,5 +83,15 @@ object MovieRecommendContentBasedFiltering {
         (title,categories,tags,actors,url,image,uploader_name,uploader_url,video_url,published_time,production,watch,like)
       }).toDF("title","categories","tags","actors","url","image","uploader_name","uploader_url","video_url","published_time","production","watch","like")
     data.write.json(outputPath)
+  }
+  def cosineSimilarity(x: Array[Double], y: Array[Double]): Double = {
+//    require(x.size == y.size)
+    dotProduct(x, y)/(magnitude(x) * magnitude(y))
+  }
+  def dotProduct(x: Array[Double], y: Array[Double]): Double = {
+    (for((a, b) <- x zip y) yield a * b) sum
+  }
+  def magnitude(x: Array[Double]): Double = {
+    math.sqrt(x map(i => i*i) sum).toFloat
   }
 }
