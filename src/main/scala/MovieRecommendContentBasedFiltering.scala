@@ -4,11 +4,13 @@ import org.apache.spark.ml.feature.Word2Vec
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.mllib.linalg.distributed.{CoordinateMatrix, MatrixEntry}
 import org.apache.spark.rdd.RDD
-import org.apache.spark.sql.{SparkSession}
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.expressions.Window
 import org.apache.spark.sql.functions._
 import org.elasticsearch.spark.sql._
 import org.slf4j
 import org.slf4j.LoggerFactory
+import org.apache.spark.sql.functions.row_number
 
 
 object MovieRecommendContentBasedFiltering {
@@ -41,7 +43,6 @@ object MovieRecommendContentBasedFiltering {
 //      .limit(4)
       .toDF()
 
-
     val w2v = new Word2Vec()
       .setInputCol("tags")
       .setOutputCol("features")
@@ -51,6 +52,8 @@ object MovieRecommendContentBasedFiltering {
       .fit(porn)
     val w2vResult = w2v.transform(porn)
 
+
+    //===================
     val compare = w2vResult.select("id", "features").map(a => (a.getString(0), a.getAs[DenseVector](1).toArray)).rdd.zipWithIndex().cache()
     val indexMap = compare.map { case ((id, vec), index) => (index, id) }.collectAsMap()
     val comArray = compare.collect()
@@ -58,53 +61,49 @@ object MovieRecommendContentBasedFiltering {
 //    val comRdd = compare.repartition(6)
     val br_c = spark.sparkContext.broadcast(comArray)
 
-    val r = comRdd.map(rdd => {
-      val recommend = br_c.value.map(d => {
-        if (rdd._2 < d._2) {
-          val sim = cosineSimilarity(rdd._1._2, d._1._2)
-          (d._2, sim)
-        }
-        else
-          (d._2, 0.0)
-      })
-      (rdd._2, recommend)
-    }).flatMap(tp => {
-      tp._2.filter(_._2 != 0.0).map(tp2 => {
-        (indexMap(tp._1), indexMap(tp2._1), tp2._2)
+    val r = comRdd.mapPartitions(it => {
+      val c = br_c.value
+      it.flatMap(rdd => {
+        val recommend = c.flatMap(d => {
+          if (rdd._2 < d._2) {
+            val sim = cosineSimilarity(rdd._1._2, d._1._2).formatted("%.4f").toDouble
+            Array((rdd._2, d._2, sim), (d._2, rdd._2, sim))
+          }
+          else
+            Array.empty[(Long, Long, Double)]
+        })
+        recommend
       })
     })
-
-    val rr = r.map(x => {
-      (x._2, x._1, x._3)
-    }).toDF("id1", "id2", "sim")//.repartition(200)
-
-    val rt = r.toDF("id1", "id2", "sim").join(rr, Seq("id1", "id2", "sim"), "outer").orderBy(desc("sim"))
-      .map(x => {
-        (x.getString(0), x.getString(1) + "-" + x.getDouble(2).toString)
-      })
-      .groupBy("_1").agg(concat_ws(",", collect_list("_2")) as "sim")
-      .map(x => {
-        (x.getString(0), x.getString(1).split(",").slice(0, 20))
-      }).toDF("id", "sim")
-    val result = porn.join(rt, rt("id") === porn("id")).drop(rt("id")).repartition(6)
-
-    //    result.show(false)
-
-    result.saveToEs("porn_1/recommend", Map("es.mapping.id" -> "id"))
+    val df = r
+      .groupBy(_._1)
+      .mapValues(_.toList.sortBy(-_._3).take(20).map(
+        x =>
+          indexMap(x._2) + "-" + x._3
+      )).map(x => (indexMap(x._1), x._2)).toDF("_1", "sim")
+    val result = porn.join(df, df("_1") === porn("id")).drop(df("_1")).repartition(6)
+//    result.show(false)
+    result.saveToEs("porn/recommend", Map("es.mapping.id" -> "id"))
+    //==================
 
 
-    //    val r = comRdd.map(rdd => {
-    //      val recommend = br_c.value.map(d => {
-    //        val sim = cosineSimilarity(rdd._2, d._2)
-    //        (d._1, sim)
-    //      }).filter(_._1 != rdd._1).sortBy(-_._2).take(21).map(_._1)
-    //      (rdd._1, recommend)
-    //    }).collect().sortBy(_._1)
-    //    val rddResult = spark.sparkContext.parallelize(r).toDF("id", "sim")
-    //
-    //    val resultDF = porn.join(rddResult, porn("id") === rddResult("id")).drop(rddResult("id"))
-    //    resultDF.show()
-    //    resultDF.saveToEs("porn/recommend", Map("es.mapping.id" -> "id"))
+//        val compare = w2vResult.select("id", "features").map(a => (a.getString(0), a.getAs[DenseVector](1).toArray)).rdd.cache()
+//            val comArray = compare.collect()
+//            val comRdd = compare.repartition(args(0).toInt)
+//    //            val comRdd = compare.repartition(6)
+//            val br_c = spark.sparkContext.broadcast(comArray)
+//            val r = comRdd.map(rdd => {
+//              val recommend = br_c.value.map(d => {
+//                val sim = cosineSimilarity(rdd._2, d._2)
+//                (d._1, sim)
+//              }).filter(_._1 != rdd._1).sortBy(-_._2).take(21).map(_._1)
+//              (rdd._1, recommend)
+//            }).collect().sortBy(_._1)
+//            val rddResult = spark.sparkContext.parallelize(r).toDF("id", "sim")
+//
+//            val resultDF = porn.join(rddResult, porn("id") === rddResult("id")).drop(rddResult("id"))
+//    //        resultDF.show()
+//            resultDF.saveToEs("porn_t/recommend", Map("es.mapping.id" -> "id"))
   }
 
   def cosineSimilarity(x: Array[Double], y: Array[Double]): Double = {
