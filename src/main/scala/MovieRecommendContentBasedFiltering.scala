@@ -125,7 +125,7 @@ object MovieRecommendContentBasedFiltering {
     val sendLineMessage = Http("https://api.line.me/v2/bot/message/broadcast")
       .postData(message)
       .header("content-type", "application/json")
-      .header("Authorization", "Bearer {fh/W8kiTXOCvTwk7tO62cd4OhrB5KAX3KlcyQUAexprLstLiwd9r54vIRirC8/83SoQIFdBUoEId/N78uIgOAkod1z4Tv/IUoZlGEy7II93KwOePYx4V0cmiRxnoS3U6IHYS1bv1G2Q1g7uqlc63vwdB04t89/1O/w1cDnyilFU=}")
+      .header("Authorization", "Bearer {token}")
       .asString
   }
 
