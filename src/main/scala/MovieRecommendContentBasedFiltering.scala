@@ -1,18 +1,11 @@
-
 import java.util.concurrent.TimeUnit
-
-import org.apache.hadoop.conf.Configuration
-import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.feature.Word2Vec
 import org.apache.spark.ml.linalg.DenseVector
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.functions._
 import org.elasticsearch.spark.sql._
-import org.slf4j
-import org.slf4j.LoggerFactory
 import scalaj.http.Http
-
 
 object MovieRecommendContentBasedFiltering {
   def main(args: Array[String]): Unit = {
@@ -20,7 +13,7 @@ object MovieRecommendContentBasedFiltering {
     Logger.getLogger("org.apache.spark").setLevel(Level.WARN)
     Logger.getLogger("org.eclipse.jetty.server").setLevel(Level.OFF)
     val spark = SparkSession.builder.appName("MovieRecommend")
-//      .master("local[*]")
+      //.master("local[*]")
       .config("spark.serializer", "org.apache.spark.serializer.KryoSerializer")
       .config("spark.kryoserializer.buffer.max", "512")
       .config("spark.network.timeout", "600s")
@@ -33,14 +26,14 @@ object MovieRecommendContentBasedFiltering {
 
     import spark.implicits._
     val hdfsPath = "/datalake/data/video"
-    val porn = spark.read.parquet(hdfsPath)
-      .filter(size($"tags") > 0)
+    val film = spark.read.parquet(hdfsPath).filter(size($"tags") > 0).dropDuplicates("item_id")
+    val porn = film
       .withColumn("id", $"item_id")
       .drop($"item_id")
       .drop($"spider_name")
       .drop($"created_time")
       .drop($"save_date")
-      //          .limit(4)
+      //      .limit(1000)
       .toDF()
 
     val w2v = new Word2Vec()
@@ -58,7 +51,7 @@ object MovieRecommendContentBasedFiltering {
     val indexMap = compare.map { case ((id, vec), index) => (index, id) }.collectAsMap()
     val comArray = compare.collect()
     val comRdd = compare.repartition(args(0).toInt)
-    //        val comRdd = compare.repartition(6)
+    //    val comRdd = compare .repartition(6)
     val br_c = spark.sparkContext.broadcast(comArray)
 
     val r = comRdd.mapPartitions(it => {
@@ -82,9 +75,52 @@ object MovieRecommendContentBasedFiltering {
           indexMap(x._2) + "-" + x._3
       )).map(x => (indexMap(x._1), x._2)).toDF("_1", "sim")
     val result = porn.join(df, df("_1") === porn("id")).drop(df("_1")).repartition(6)
-    result.show(false)
+    //    result.show(false)
+    val getOriIndexSize = Http("http://10.205.48.52:9200/porn/_count").asString
+    val oriIndexSize = getOriIndexSize.body.split("\\D+").filter(_.nonEmpty).toList(0).toInt
     result.saveToEs("porn/recommend", Map("es.mapping.id" -> "id"))
-    //== v2 ==
+    val getIndexSize = Http("http://10.205.48.52:9200/porn/_count").asString
+    val indexSize = getIndexSize.body.split("\\D+").filter(_.nonEmpty).toList(0).toInt
+    //  == v2 ==
+
+
+    //  ====send line message====
+    val endTime = TimeUnit.MINUTES.convert(System.nanoTime - startTime, TimeUnit.NANOSECONDS)
+    val updateFilmNum = indexSize - oriIndexSize
+    val date = current_date()
+    val todayFilm = film.filter($"save_date".equalTo(date)).select("title", "item_id").orderBy(desc("watch")).limit(3)
+      .collect()
+    val url = "https://demo.65lzg.com/page?id="
+    val f0 = todayFilm(0).get(0)
+    val u0 = url + todayFilm(0).get(1)
+    val f1 = todayFilm(1).get(0)
+    val u1 = url + todayFilm(1).get(1)
+    val f2 = todayFilm(2).get(0)
+    val u2 = url + todayFilm(2).get(1)
+
+
+    val updateMessage =
+      s"""{"messages":[{"type": "text","text": "今天的更新已經完成"},
+         |{"type": "text","text": "新增影片數量 : $updateFilmNum"},
+         |{"type": "text","text": "更新時間為 $endTime 分鐘"}]}""".stripMargin
+
+    val filmMessage =
+      s"""{"messages":[{"type": "text","text": "本日熱門影片 : "},
+         |{"type": "text","text": "$f0 $u0"},
+         |{"type": "text","text": "$f1 $u1"},
+         |{"type": "text","text": "$f2 $u2"}]}""".stripMargin
+
+    val token = spark.read.text("/user/james/linetoken.txt").collect()(0).get(0).toString
+    val sendUpdateMessage = Http("https://api.line.me/v2/bot/message/broadcast")
+      .postData(updateMessage)
+      .header("content-type", "application/json")
+      .header("Authorization", s"Bearer {$token}")
+      .asString
+    val sendFilmMessage = Http("https://api.line.me/v2/bot/message/broadcast")
+      .postData(filmMessage)
+      .header("content-type", "application/json")
+      .header("Authorization", s"Bearer {$token}")
+      .asString
 
     //== v1 ==
     //        val compare = w2vResult.select("id", "features").map(a => (a.getString(0), a.getAs[DenseVector](1).toArray)).rdd.cache()
@@ -105,28 +141,6 @@ object MovieRecommendContentBasedFiltering {
     //    //        resultDF.show()
     //            resultDF.saveToEs("porn_t/recommend", Map("es.mapping.id" -> "id"))
     //== v1 //
-
-
-    //send line message
-    val endTime = TimeUnit.MINUTES.convert(System.nanoTime - startTime ,TimeUnit.NANOSECONDS)
-    val fs = FileSystem.get(new Configuration()).listStatus(new Path("/datalake/checkpoint/parquet/video/offsets"))
-    val offset = fs.indexOf(fs.last)
-
-    val today = spark.read.json("/datalake/checkpoint/parquet/video/offsets/" + offset)
-      .select("video").where("video is not null").collect()(0)(0).toString
-    val yestoday = spark.read.json("/datalake/checkpoint/parquet/video/offsets/" + (offset - 1))
-      .select("video").where("video is not null").collect()(0)(0).toString
-    val updateFilmNum = today.substring(1, today.length - 1).toInt - yestoday.substring(1, yestoday.length - 1).toInt
-
-    val message =
-      s"""{"messages":[{"type": "text","text": "今天的更新已經完成"},
-         |{"type": "text","text": "新增影片數量 : $updateFilmNum"},
-         |{"type": "text","text": "更新時間為 $endTime 分鐘"}]}""".stripMargin
-    val sendLineMessage = Http("https://api.line.me/v2/bot/message/broadcast")
-      .postData(message)
-      .header("content-type", "application/json")
-      .header("Authorization", "Bearer {fh/W8kiTXOCvTwk7tO62cd4OhrB5KAX3KlcyQUAexprLstLiwd9r54vIRirC8/83SoQIFdBUoEId/N78uIgOAkod1z4Tv/IUoZlGEy7II93KwOePYx4V0cmiRxnoS3U6IHYS1bv1G2Q1g7uqlc63vwdB04t89/1O/w1cDnyilFU=}")
-      .asString
   }
 
   def cosineSimilarity(x: Array[Double], y: Array[Double]): Double = {
