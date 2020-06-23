@@ -1,4 +1,8 @@
+
 import java.util.concurrent.TimeUnit
+
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, Path}
 import org.apache.log4j.{Level, Logger}
 import org.apache.spark.ml.feature.Word2Vec
 import org.apache.spark.ml.linalg.DenseVector
